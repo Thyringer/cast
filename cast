@@ -1,0 +1,296 @@
+#!/usr/bin/env python
+
+# This is free and unencumbered software released into the public domain.
+
+# Anyone is free to copy, modify, publish, use, compile, sell, or
+# distribute this software, either in source code form or as a compiled
+# binary, for any purpose, commercial or non-commercial, and by any
+# means.
+
+# In jurisdictions that recognize copyright laws, the author or authors
+# of this software dedicate any and all copyright interest in the
+# software to the public domain. We make this dedication for the benefit
+# of the public at large and to the detriment of our heirs and
+# successors. We intend this dedication to be an overt act of
+# relinquishment in perpetuity of all present and future rights to this
+# software under copyright law.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+# OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+# ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+# For more information, please refer to <http://unlicense.org/
+
+# Author: Enrico Rippin <enrico.rippin@gmx.de> 2024
+# Last Update: 2024-08-12
+# Version: 1.0
+
+import argparse
+import csv
+import os
+import re
+import sys
+
+from argparse import Namespace
+from collections import namedtuple
+from functools import partial
+from typing import Callable
+
+import xxhash
+
+
+setattr(xxhash, 'xxh128', xxhash.xxh3_128)
+
+
+def signed_int(uint: int, bit: int) -> int:
+	if uint > ((2 ** bit) - 1):
+		raise ValueError(f"Unsigned integer {uint} is too large for a {bit}-bit signed integer.")
+	else:
+		return uint if uint < (2 ** (bit - 1)) else uint - (2 ** bit)	
+
+
+def hex_to_uuid(hex_str: str) -> str:
+	if len(hex_str) > 32:
+		raise ValueError("Hexadecimal string is too large to be converted into a UUID.")
+	
+	hex_str = hex_str.zfill(32)
+	
+	return '{}-{}-{}-{}-{}'.format(hex_str[:8], hex_str[8:12], hex_str[12:16], hex_str[16:20], hex_str[20:])
+
+
+Default = namedtuple('Default', ('is_string', 'value'), defaults=(False, None))
+
+
+class App:
+
+	algorithms = [
+		'32' , '32s', '32x',
+		'xxh32', 'xxh32s', 'xxh32x',
+		'64', '64s', '64x',
+		'xxh64', 'xxh64s', 'xxh64x',
+		'3_64', '3_64s', '3_64x',
+		'xxh3_64', 'xxh3_64s', 'xxh3_64x',
+		'128', '128s', '128x', 'uuid',
+		'xxh128', 'xxh128s', 'xxh128x', 'xxh_uuid',
+		'3_128', '3_128s', '3_128x',
+		'xxh3_128', 'xxh3_128s', 'xxh3_128x', 'xxh3_uuid'
+	]
+
+
+	def __init__(self):
+		# 1 Define CLI interface:
+		parser = argparse.ArgumentParser(
+			prog='cast',
+			description="Application to generate SQL commands or other output with automatically hashed values ​​using an algorithm of the xxHash family, and fed from console input or sources such as CSV data."
+		)
+		parser.add_argument(
+			'strings', metavar='<strings>', type=str, nargs='*', # variadic positional argument
+				help=f"Any number of strings where the first argument can be one of the choices to select the hash algorithm: {App.algorithms}. If no hash algorithm is specified, 'xxh64' is assumed by default."
+		)
+		parser.add_argument(
+			'--read', '-r', type=str, default=None,
+				help="Specify text file with strings to read, one per line or column related (CSV)."
+		)
+		parser.add_argument(
+			'--write', '-w', type=str, default=None,
+				help="Specify path of the file where output should be written."
+		)
+		parser.add_argument(
+			'--input', '-i', type=str, default="",
+				help="Set input template with {string} as placeholder to hash; for CSV files, the column names are equally available."
+		)
+		parser.add_argument(
+			'--output', '-o', type=str, default="",
+				help="Set output template for the individual records with the placeholders {string}, {input} and {hash}, but also all column names of a read CSV file including possible default values {<column>:<default>}."
+		)
+		parser.add_argument(
+			'--template', '-t', type=str, default="{records}\n",
+				help="Define overall template with the possible placeholder {records}."
+		)
+		parser.add_argument(
+			'--spacing', '-s', type=str, default=",\n",
+				help="Specify insertion between all printed records."
+		)
+
+		# 2 Parse arguments and create additional attributes:
+		self.__dict__.update(vars(parser.parse_args()))
+
+		self.constructor = xxhash.xxh64
+		self.digest = self.constructor.intdigest
+
+		self.defaults: dict[str, Default] = { }
+		self.requires_hash = False
+		self.is_uuid = False
+
+		if len(self.strings) > 0 and (algorithm := self.strings[0].lower()) in App.algorithms:
+			self.is_uuid = algorithm[-4:] == "uuid"
+
+			if self.is_uuid:
+				algorithm = "xxh3_128x"
+			else:
+				algorithm = f"xxh{algorithm}" if bool(re.match(r'^\d', algorithm)) else algorithm
+
+			self.strings = self.strings[1:]
+
+			signed = algorithm[-1] == 's'
+
+			hexadecimal = algorithm[-1] == 'x'
+
+			algorithm = algorithm[:-1] if signed or hexadecimal else algorithm
+			self.constructor = getattr(xxhash, algorithm)
+
+			if signed:
+				match algorithm[3:]:
+					case '32': self.digest = lambda n: signed_int(self.constructor.intdigest(n), 32)
+					case '64' | '3_64': self.digest = lambda n: signed_int(self.constructor.intdigest(n), 64)
+					case '128' | '3_128': self.digest = lambda n: signed_int(self.constructor.intdigest(n), 128)
+			elif hexadecimal:
+				self.digest = self.constructor.hexdigest
+			else:
+				self.digest = self.constructor.intdigest
+		
+		#print(f"args.constructor = {args.constructor}")
+		#print(f"args.digest = {args.digest}")
+
+
+		if bool(self.input) and '{' not in self.input:
+			self.input = '{' + self.input + '}'
+				# Allows passing just the column name without additional format characters.
+
+		self.head = []
+		self.data = [] # Final data that will be printed at the end.
+
+		# 3 Start with the actual processing and generate output:
+		self.process()
+
+
+	def process(self):
+		"""Processes input and prints results."""
+		if bool(self.read):
+			if not os.path.isfile(self.read):
+				sys.exit(f"File {self.read} does not exist")
+
+			elif self.read.lower().endswith('.csv'):
+				self.process_csv_file()
+
+			else:
+				with open(self.read, 'r') as file:
+					self.strings += [
+						stripped for s in file.readlines() if (stripped := s.split('#', 1)[0].strip())]
+				self.process_strings()
+				#print(f"strings = {args.strings}")
+		else:
+			self.process_strings()
+
+		self.print()
+
+
+	def extract_defaults(self):
+		matches = re.findall(r'\{(.*?)\}', self.output)
+			# Find all content within curly brackets.
+		#print(f"matches = {matches}")
+
+		for match in matches:
+			if match[0] == '#':
+				is_string = True
+				match = match[1:]
+			else:
+				is_string = False
+
+			column, default = [x.strip() for x in match.split('=', 1)] if '=' in match else (match.strip(), None)
+			self.defaults[column] = Default(is_string, default)
+
+		self.output = re.sub(r'{#', '{', re.sub(r'=\w*}', '}', self.output))
+			# Remove all default values ​​to get a valid format string.
+
+		return self
+
+
+	def complete_record(self, record: dict) -> dict:
+		try:
+			record['input'] = self.input.format(**record)
+		except KeyError as e:
+			sys.exit(f"Unknown input placeholder '{e.args[0]}'")
+		
+		#print(f"args.requires_hash = {args.requires_hash}")
+		if self.requires_hash:
+				# Avoids unnecessary hashing if the placeholder {hash} is not included in the output template, and thus no hash value requested.
+			digest = str(self.digest(self.constructor(record['input'])))
+			record['hash'] = hex_to_uuid(digest) if self.is_uuid else digest
+
+		revise = lambda col, val: f"'{val}'" if col in self.defaults and self.defaults[col].is_string else val
+		revised_record = { col: (revise(col, val) if bool(val) else self.defaults[col].value) for col, val in record.items() }
+
+		return revised_record
+
+
+	def process_strings(self):
+		"""Calculates the hash for each string if needed."""
+		self.output = self.output if bool(self.output) else "{#input} => {hash}"
+		self.requires_hash = "hash" in self.output
+		#print(f"args.strings = {args.strings}")
+		self.extract_defaults()
+		#print(f"args.defaults = {self.defaults}")
+
+		self.input = self.input if bool(self.input) else "{string}"
+
+		for string in self.strings:
+			self.data.append(self.output.format(**self.complete_record({ 'string': string })))
+
+
+	def process_csv_file(self):
+		"""Processes a CSV file and generates hashes based on column values."""
+		with open(self.read, 'r', newline='') as file:
+			reader = csv.DictReader(file)
+			self.head = [name.strip().replace(" ", "_") for name in reader.fieldnames]
+			reader.fieldnames = self.head
+				# Overwrite field names with corrected ones for later matching with placeholders.
+			#print(f"self.head = {self.head}")
+			format = ",".join([f"{{{x}}}" for x in self.head])
+			self.output = self.output if bool(self.output) else f"{{hash}},{format}"
+				# If no record template is given, a new column with the hash values ​​is appended at the beginning.
+			#print(f"args.output = {self.output}")
+			self.requires_hash = "hash" in self.output
+
+			self.extract_defaults()
+			#print(f"defaults = {defaults}")
+
+			self.input = self.input if bool(self.input) else format
+				# If no template for hashing was given with `--input`, all read columns are used, separated by commas.
+			#print(f"args.input = '{args.input}'")
+
+			for row in reader:
+				#print(f"row = {row}")
+				completed_row = self.complete_record({ col.strip(): val.strip() for col, val in row.items() })
+				#print(f"completed_row = {completed_row}")
+				try:
+					self.data.append(self.output.format(**completed_row))
+				except KeyError as e:
+					sys.exit(f"Unknown record placeholder '{e.args[0]}'")
+
+
+	def print(self):
+		"""Prints the resulting data either to the console or a file."""
+
+		def _print_data(write: Callable[[str], None]):
+			try:
+				records = self.spacing.join([record for record in self.data])
+				write(self.template.format(records=records))
+			except KeyError as e:
+				sys.exit(f"Unknown placeholder '{e.args[0]}' in output template")
+
+		if self.write:
+			with open(self.write, 'w') as f:
+				_print_data(f.write)
+			print(f"Hashes have been written to '{self.write}'.")
+		
+		else:
+			_print_data(partial(print, end=''))
+
+
+if __name__ == '__main__':
+	App()
