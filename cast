@@ -278,7 +278,7 @@ class App:
 
 		def _print_data(write: Callable[[str], None]):
 			try:
-				records = self.spacing.join([record for record in self.data])
+				records = self.spacing.join(self.data)
 				write(self.template.format(records=records))
 			except KeyError as e:
 				sys.exit(f"Unknown placeholder '{e.args[0]}' in output template")

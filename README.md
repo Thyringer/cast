@@ -24,6 +24,7 @@ When reading CSV files, the column names are available as placeholders within th
    `export PATH=$HOME/.local/bin:$PATH`
 
    if this search path for executable scripts is not yet known.
+3. Make the script file executable with `chmod +x cast`.
 
 ## Usage
 
@@ -38,13 +39,13 @@ cast [<mode>] <strings> [<options>]
 
 The first parameter specifies the algorithm, with the following options available:
 
-- `    32` → `xxh32` 
-- `    64` → `xxh64`
-- `  3_64` → `xxh3_64` 
+- `   32` → `xxh32` 
+- `   64` → `xxh64`
+- ` 3_64` → `xxh3_64` 
 - `3_128` → `xxh3_128`
-- `  uuid` → hexadecimal digest of  `xxh3_128` formated as a UUID
+- ` uuid` → hexadecimal digest of  `xxh3_128` formated as a UUID
 
-In addition, each algorithm has a variant for a hexadecimal number `32x` and an unsigned integer `s32` as a result.
+In addition, each algorithm has a variant for a hexadecimal number `32x` and an unsigned integer `s32` as a result (which can be particularly useful in the context of PostgreSQL, since there are only signed integers available).
 
 By default, `64` is assumed.
 
